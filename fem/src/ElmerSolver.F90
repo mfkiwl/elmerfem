@@ -59,7 +59,9 @@
 
      USE Lists
      USE MainUtils
-     
+     USE OptimizationUtils
+     USE SolverUtils, ONLY: GetControlValue
+    
 !------------------------------------------------------------------------------
      IMPLICIT NONE
 !------------------------------------------------------------------------------
@@ -96,7 +98,7 @@
 
      TYPE(ParEnv_t), POINTER :: ParallelEnv
 
-     CHARACTER(LEN=MAX_NAME_LEN) :: ModelName, eq, ExecCommand, ExtrudedMeshName
+     CHARACTER(LEN=MAX_NAME_LEN) :: ModelName, ExecCommand, ExtrudedMeshName, str
      CHARACTER(LEN=MAX_STRING_LEN) :: OutputFile, PostFile, RestartFile, &
                 OutputName=' ',PostName=' ', When, OptionString
 
@@ -117,17 +119,17 @@
 
      TYPE(Model_t), POINTER, SAVE :: Control
      CHARACTER(LEN=MAX_NAME_LEN) :: MeshDir, MeshName
-     LOGICAL :: DoControl, GotParams
+     LOGICAL :: DoControl, ExtControl, ProcControl, GotParams
      INTEGER :: nr,ni
      REAL(KIND=dp), ALLOCATABLE :: rpar(:)
      INTEGER, ALLOCATABLE :: ipar(:)
      
 #ifdef HAVE_TRILINOS
-INTERFACE
-      SUBROUTINE TrilinosCleanup() BIND(C,name='TrilinosCleanup')
-      IMPLICIT NONE
-      END SUBROUTINE TrilinosCleanup
-END INTERFACE
+     INTERFACE
+       SUBROUTINE TrilinosCleanup() BIND(C,name='TrilinosCleanup')
+         IMPLICIT NONE
+       END SUBROUTINE TrilinosCleanup
+     END INTERFACE
 #endif
 
      ! Start the watches, store later
@@ -286,7 +288,7 @@ END INTERFACE
        CALL GET_COMMAND_ARGUMENT(1, ModelName)
        IF( ModelName(1:1) /= '-') THEN 
          GotModelName = .TRUE.
-         IF (NoArgs > 1) CALL GET_COMMAND_ARGUMENT(2, eq)
+         IF (NoArgs > 1) CALL GET_COMMAND_ARGUMENT(2, str)
        END IF
      END IF
 
@@ -366,10 +368,10 @@ END INTERFACE
                TRIM(Modelname) // '], can not execute.' )
          END IF
          
-
          CurrentModel => LoadModel(ModelName,.FALSE.,ParEnv % PEs,ParEnv % MyPE,MeshIndex)
          IF(.NOT.ASSOCIATED(CurrentModel)) EXIT
 
+         
          !----------------------------------------------------------------------------------
          ! Set namespace searching mode
          !----------------------------------------------------------------------------------
@@ -441,9 +443,9 @@ END INTERFACE
 !------------------------------------------------------------------------------
 !      Check for transient case
 !------------------------------------------------------------------------------
-       eq = ListGetString( CurrentModel % Simulation, 'Simulation Type', GotIt )
-       Scanning  = ( eq == 'scanning' )
-       Transient = ( eq == 'transient' )
+       str = ListGetString( CurrentModel % Simulation, 'Simulation Type', GotIt )
+       Scanning  = ( str == 'scanning' )
+       Transient = ( str == 'transient' )
 
 !------------------------------------------------------------------------------
 !      To more conveniently support the use of VTK based visualization there 
@@ -510,56 +512,67 @@ END INTERFACE
        FirstLoad = .FALSE.
        IF ( Initialize == 1 ) EXIT
 
-       ! This sets optionally some internal parameters for doing scanning
-       ! over a parameter space / optimization. 
-       !-----------------------------------------------------------------
-       DO iSweep = 1, OptimIters
-         sSweep = 1.0_dp * iSweep
-         ! If there are no parameters this does nothing                  
-         IF( DoControl ) THEN
-           CALL ControlResetMesh(Control % Control, iSweep )            
+       ExtControl = .FALSE.
+       IF(DoControl) THEN
+         ExtControl = ListGetLogical(CurrentModel % Control,'External Optimization',Found )
+       END IF
+       
+       ExecCommand = ListGetString( CurrentModel % Simulation, &
+           'Control Procedure', ProcControl )       
+       IF ( ProcControl ) THEN
+         ControlProcedure = GetProcAddr( ExecCommand )
+         CALL ExecSimulationProc( ControlProcedure, CurrentModel )
+         
+       ELSE IF( ExtControl ) THEN
+         str = ListGetString( CurrentModel % Control,'Optimization Method',UnfoundFatal=.TRUE.)
+         IF( TRIM(str) == 'hybrd') THEN          
+           CALL ExternalOptimization_HYBRD(ExecSimulationFunVec)           
+         ELSE
+           CALL Fatal('MAIN','Unknown external optimization method!', Found ) 
+         END IF
+           
+       ELSE IF( DoControl ) THEN
+         
+         ! This sets optionally some internal parameters for doing scanning
+         ! over a parameter space / optimization. 
+         !-----------------------------------------------------------------
+         DO iSweep = 1, OptimIters
+           sSweep = 1.0_dp * iSweep
+           ! If there are no parameters this does nothing                  
+           CALL ControlResetMesh(CurrentModel % Control, iSweep )            
            IF( iSweep > 1 ) THEN
-             CALL ControlParameters(Control % Control,iSweep,&
+             CALL ControlParameters(CurrentModel % Control,iSweep,&
                  GotParams,FinishEarly)           
              IF( FinishEarly ) EXIT
              Found = ReloadInputFile(CurrentModel,RewindFile=.TRUE.)
              CALL InitializeIntervals()
            END IF
-
+           
            ! This is another calling slot as here we have formed the model structure and
            ! may toggle with the keyword coefficients. 
-           CALL ControlParameters(Control % Control,iSweep,&
+           CALL ControlParameters(CurrentModel % Control,iSweep,&
                GotParams,FinishEarly,SetCoeffs=.TRUE.)
-
+           
            IF( iSweep > 1 ) THEN
-             IF( ListGetLogical( Control % Control,'Reset Initial Conditions',Found ) ) THEN
+             IF( ListGetLogical( CurrentModel % Control,'Reset Initial Conditions',Found ) ) THEN
                CALL SetInitialConditions()
              END IF
            END IF
-           
-         END IF
-           
-         !------------------------------------------------------------------------------
-         ! Here we actually perform the simulation: ExecSimulation does it all ....
-         !------------------------------------------------------------------------------
-         ExecCommand = ListGetString( CurrentModel % Simulation, &
-             'Control Procedure', GotIt )
-         IF ( GotIt ) THEN
-           ControlProcedure = GetProcAddr( ExecCommand )
-           CALL ExecSimulationProc( ControlProcedure, CurrentModel )
-         ELSE
-           CALL ExecSimulation( TimeIntervals, CoupledMinIter, &
-               CoupledMaxIter, OutputIntervals, Transient, Scanning)
-         END IF
 
-         ! This evaluates the cost function and saves the results of control
-         IF( DoControl ) THEN
-           CALL ControlParameters(Control % Control, &
+           CALL ExecSimulation( TimeIntervals, CoupledMinIter, &
+               CoupledMaxIter, OutputIntervals, Transient, Scanning) 
+           
+           ! This evaluates the cost function and saves the results of control
+           CALL ControlParameters(CurrentModel % Control, &
                iSweep,GotParams,FinishEarly,.TRUE.)
-         END IF
-       END DO
+         END DO
+         
+       ELSE
+         CALL ExecSimulation( TimeIntervals, CoupledMinIter, &
+             CoupledMaxIter, OutputIntervals, Transient, Scanning) 
+       END IF
        
-       ! Comparison to reference is done to enable consistency test underc ctest.
+       ! Comparison to reference is done to enable consistency test under ctest.
        !-------------------------------------------------------------------------
        CALL CompareToReferenceSolution( )
 
@@ -604,7 +617,7 @@ END INTERFACE
 
    CONTAINS 
 
-
+    
      SUBROUTINE InitializeRandomSeed()
        INTEGER :: i,n
        INTEGER, ALLOCATABLE :: seeds(:)
@@ -1105,7 +1118,10 @@ END INTERFACE
      END SUBROUTINE AppendNewSolver
      
 
-     !------------------------------------------------------------------------------
+     !------------------------------------------------------------------------
+     !> Given name of a solver module find it among the active solvers and
+     !> upon success return its index. 
+     !------------------------------------------------------------------------
      FUNCTION FindSolverByProcName(Model,ProcName) RESULT (solver_id)
        IMPLICIT NONE
 
@@ -1121,23 +1137,17 @@ END INTERFACE
        solver_id = 0       
        Found = .FALSE.
 
-       !PRINT *,'procname:',TRIM(ProcName)
-       
        DO i=1, Model % NumberOfSolvers
          pSolver => CurrentModel % Solvers(i)
          str = ListGetString(pSolver % Values,'Procedure',Found)
          IF(.NOT. Found) CYCLE
 
-         !PRINT *,'str:',i,TRIM(str)
-         
          j = INDEX(str,ProcName)         
          IF( j > 0 ) THEN
            solver_id = i
            EXIT
          END IF
        END DO
-
-       !PRINT *,'j:',j,solver_id
        
      END FUNCTION FindSolverByProcName
      !------------------------------------------------------------------------------
@@ -1269,17 +1279,17 @@ END INTERFACE
       !----------------------------------------------------------------------------
       DO i=1,CurrentModel % NumberOfSolvers
 
-        eq = ListGetString( CurrentModel % Solvers(i) % Values,'Equation', Found )
+        str = ListGetString( CurrentModel % Solvers(i) % Values,'Equation', Found )
      
         IF ( Found ) THEN
-          nlen = LEN_TRIM(eq)
+          nlen = LEN_TRIM(str)
           DO j=1,CurrentModel % NumberOFEquations
              ActiveSolvers => ListGetIntegerArray( CurrentModel % Equations(j) % Values, &
                                 'Active Solvers', Found )
              IF ( Found ) THEN
                 DO k=1,SIZE(ActiveSolvers)
                    IF ( ActiveSolvers(k) == i ) THEN
-                      CALL ListAddLogical( CurrentModel % Equations(j) % Values, eq(1:nlen), .TRUE. )
+                      CALL ListAddLogical( CurrentModel % Equations(j) % Values, str(1:nlen), .TRUE. )
                       EXIT
                    END IF
                 END DO
@@ -1291,8 +1301,8 @@ END INTERFACE
      ! Add the dynamically linked solver to be called later
      !---------------------------------------------------------------------
      DO i=1,CurrentModel % NumberOfSolvers
-        eq = ListGetString( CurrentModel % Solvers(i) % Values,'Equation', Found )
-        CALL Info('AddSolvers','Setting up solver '//TRIM(I2S(i))//': '//TRIM(eq),Level=10)
+        str = ListGetString( CurrentModel % Solvers(i) % Values,'Equation', Found )
+        CALL Info('AddSolvers','Setting up solver '//TRIM(I2S(i))//': '//TRIM(str),Level=10)
 
         Solver => CurrentModel % Solvers(i)
         InitSolver = ListGetLogical( Solver % Values, 'Initialize', Found )
@@ -1306,7 +1316,7 @@ END INTERFACE
             Solver % Mesh => CurrentModel % Meshes
           END IF
           CurrentModel % Solver => Solver
-          CALL AddEquationBasics( Solver, eq, Transient )
+          CALL AddEquationBasics( Solver, str, Transient )
           CALL AddEquationSolution( Solver, Transient )
         END IF
      END DO
@@ -2077,8 +2087,6 @@ END INTERFACE
      
        Mesh => Mesh % Next
      END DO
-
-
        
 !------------------------------------------------------------------------------
    END SUBROUTINE InitCond
@@ -2291,6 +2299,7 @@ END INTERFACE
      INTEGER, SAVE :: PrevMeshI = 0
      INTEGER :: nPeriodic, nSlices, nTimes, iSlice, iTime
      LOGICAL :: ParallelTime, ParallelSlices, IsPeriodic
+     CHARACTER(*), PARAMETER :: Caller = 'ExecSimulation'
      
      !$OMP PARALLEL
      IF(.NOT.GaussPointsInitialized()) CALL GaussPointsInit()
@@ -2336,13 +2345,14 @@ END INTERFACE
          .AND. ( ParEnv % PEs > 1 ) 
 
      ! For parallel slices we need to introduce the slices
+     ! Let this be active even for serial case to have consistent setup
      ParallelSlices = ListGetLogical( CurrentModel % Simulation,'Parallel Slices',GotIt ) 
          !.AND. ( ParEnv % PEs > 1 )
 
      IF( ParallelTime .OR. ParallelSlices ) THEN
        IF( ParEnv % PEs > 1 ) THEN
          IF(.NOT. ListGetLogical( CurrentModel % Simulation,'Single Mesh',GotIt ) ) THEN
-           CALL Fatal('ExecSimulation','Parallel time and slices only available with "Single Mesh"')
+           CALL Fatal(Caller,'Parallel time and slices only available with "Single Mesh"')
          END IF
        END IF
      END IF
@@ -2357,17 +2367,17 @@ END INTERFACE
        nSlices = ListGetInteger( CurrentModel % Simulation,'Number Of Slices',GotIt)
        IF(GotIt) THEN
          IF( nSlices > ParEnv % PEs ) THEN
-           CALL Fatal('ExecSimulation','"Number Of Slices" cannot be be larger than #np')
+           CALL Fatal(Caller,'"Number Of Slices" cannot be be larger than #np')
          END IF
        ELSE
          IF( ParEnv % PEs == 1 ) THEN
            CALL ListAddInteger( CurrentModel % Simulation,'Number Of Slices',nSlices)
          ELSE
-           CALL Fatal('ExecSimulation','We need "Number Of Slices" with parallel timestepping')
+           CALL Fatal(Caller,'We need "Number Of Slices" with parallel timestepping')
          END IF
        END IF
        IF( MODULO( ParEnv % PEs, nSlices ) /= 0 ) THEN
-         CALL Fatal('ExecSimulation','For hybrid parallellism #np must be divisible with "Number of Slices"')
+         CALL Fatal(Caller,'For hybrid parallellism #np must be divisible with "Number of Slices"')
        END IF
        nTimes = ParEnv % PEs / nSlices 
        CALL ListAddInteger( CurrentModel % Simulation,'Number Of Times',nTimes )
@@ -2378,23 +2388,23 @@ END INTERFACE
        iTime = ParEnv % MyPe
        CALL ListAddInteger( CurrentModel % Simulation,'Number Of Times',nTimes )
        CALL ListAddInteger( CurrentModel % Simulation,'Number Of Slices',nSlices )
-       CALL Info('ExecSimulation','Setting one time sector for each partition!')
+       CALL Info(Caller,'Setting one time sector for each partition!')
      ELSE IF( ParallelSlices ) THEN
        nSlices = ParEnv % PEs
        iSlice = ParEnv % MyPe
        CALL ListAddInteger( CurrentModel % Simulation,'Number Of Times',nTimes )
        CALL ListAddInteger( CurrentModel % Simulation,'Number Of Slices',nSlices )
-       CALL Info('ExecSimulation','Setting one slice for each partition!')
+       CALL Info(Caller,'Setting one slice for each partition!')
      END IF
 
      IF( nTimes > 1 ) THEN
        DO i=1,SIZE(Timesteps,1)
          IF( MODULO( Timesteps(i), nTimes ) /= 0 ) THEN
-           CALL Fatal('ExecSimulation','"Timestep Intervals" should be divisible by nTimes: '//TRIM(I2S(nTimes)))
+           CALL Fatal(Caller,'"Timestep Intervals" should be divisible by nTimes: '//TRIM(I2S(nTimes)))
          END IF
          Timesteps(i) = Timesteps(i) / nTimes
        END DO
-       CALL Info('ExecSimulation','Divided timestep intervals equally for each partition!',Level=4)
+       CALL Info(Caller,'Divided timestep intervals equally for each partition!',Level=4)
      END IF
 
      IsPeriodic = ListCheckPrefix( CurrentModel % Simulation,'Periodic Time') .OR. &
@@ -2403,10 +2413,10 @@ END INTERFACE
      nPeriodic = ListGetInteger( CurrentModel % Simulation,'Periodic Timesteps',GotIt )
      IF( ParallelTime ) THEN
        IF( nPeriodic <= 0 ) THEN
-         CALL Fatal('ExecSimulation','Parallel timestepping requires "Periodic Timesteps"')
+         CALL Fatal(Caller,'Parallel timestepping requires "Periodic Timesteps"')
        END IF
        IF( MODULO( nPeriodic, nTimes ) /= 0 ) THEN
-         CALL Fatal('ExecSimulation','For parallel timestepping "Periodic Timesteps" must be divisible by #np')
+         CALL Fatal(Caller,'For parallel timestepping "Periodic Timesteps" must be divisible by #np')
        END IF
        nPeriodic = nPeriodic / nTimes
      END IF
@@ -2477,7 +2487,7 @@ END INTERFACE
          IF ( ( Transient .OR. Scanning ) .AND. .NOT. GotIt ) THEN
            dtfunc = ListGetCReal( CurrentModel % Simulation,'Timestep Function',GotIt )
            IF(GotIt) THEN
-             CALL Warn('ExecSimulation','Obsolete keyword > Timestep Function < , use > Timestep Size < instead')
+             CALL Warn(Caller,'Obsolete keyword > Timestep Function < , use > Timestep Size < instead')
            ELSE           
              dtfunc = ListGetCReal( CurrentModel % Simulation,'Timestep Size', gotIt)
            END IF
@@ -2510,7 +2520,7 @@ END INTERFACE
              dt = dtfunc
              IF(dt < EPSILON(dt) ) THEN
                WRITE(Message,'(A,ES12.3)') 'Timestep smaller than epsilon: ',dt
-               CALL Fatal('ExecSimulation', Message)
+               CALL Fatal(Caller, Message)
              END IF             
            ELSE 
              dt = TimestepSizes(interval,1)
@@ -2582,7 +2592,7 @@ END INTERFACE
              IF( cum_Timestep == 1 ) THEN
                sTime(1) = sTime(1) + iTime * nPeriodic * dt
              ELSE IF( MODULO( cum_Timestep, nPeriodic ) == 1 ) THEN
-               CALL Info('ExecSimulation','Making jump in time-parallel scheme!')
+               CALL Info(Caller,'Making jump in time-parallel scheme!')
                sTime(1) = sTime(1) + nPeriodic * (nTimes - 1) * dt
              END IF
            ELSE
@@ -2615,9 +2625,9 @@ END INTERFACE
              sAngle(1) = ListGetCReal( CurrentModel % Simulation,'Rotor Angle')
              sAngleVelo(1) = (sAngle(1)-PrevAngle)/dt
              WRITE(Message,'(A,ES12.3)') '"Rotor Angle" set to value: ',sAngle(1)
-             CALL Info('ExecSimulation',Message,Level=6)
+             CALL Info(Caller,Message,Level=6)
              WRITE(Message,'(A,ES12.3)') '"Rotor Velo" set to value: ',sAngleVelo(1)
-             CALL Info('ExecSimulation',Message,Level=6)
+             CALL Info(Caller,Message,Level=6)
            END BLOCK
          END IF       
          
@@ -2641,9 +2651,9 @@ END INTERFACE
              IF( i > 0 .AND. i /= PrevMeshI ) THEN                             
                MeshStr = ListGetString( GetSimulation(),'Mesh Name '//TRIM(I2S(i)),GotIt)
                IF( GotIt ) THEN
-                 CALL Info('ExecSimulation','Swapping mesh to: '//TRIM(MeshStr),Level=5)
+                 CALL Info(Caller,'Swapping mesh to: '//TRIM(MeshStr),Level=5)
                ELSE
-                 CALL Fatal('ExecSimulation','Could not find >Mesh Name '//TRIM(I2S(i))//'<')
+                 CALL Fatal(Caller,'Could not find >Mesh Name '//TRIM(I2S(i))//'<')
                END IF
                CALL SwapMesh( CurrentModel, Mesh, MeshStr )
                PrevMeshI = i
@@ -2707,7 +2717,7 @@ END INTERFACE
 
             IF(.NOT. ALLOCATED( AdaptVars ) ) THEN
               ALLOCATE( AdaptVars( nSolvers ), STAT = AllocStat )
-              IF( AllocStat /= 0 ) CALL Fatal('ExecSimulation','Allocation error for AdaptVars')
+              IF( AllocStat /= 0 ) CALL Fatal(Caller,'Allocation error for AdaptVars')
               
               DO i=1,nSolvers
                 Solver => CurrentModel % Solvers(i)
@@ -2717,15 +2727,15 @@ END INTERFACE
 
                 IF( .NOT. ASSOCIATED( Solver % Variable ) ) CYCLE
                 IF( .NOT. ASSOCIATED( Solver % Variable  % Values ) ) CYCLE
-                CALL Info('ExecSimulation','Allocating adaptive work space for: '//TRIM(I2S(i)),Level=12)
+                CALL Info(Caller,'Allocating adaptive work space for: '//TRIM(I2S(i)),Level=12)
                 j = SIZE( Solver % Variable % Values )
                 ALLOCATE( AdaptVars(i) % Var % Values( j ), STAT=AllocStat )
-                IF( AllocStat /= 0 ) CALL Fatal('ExecSimulation','Allocation error AdaptVars Values')
+                IF( AllocStat /= 0 ) CALL Fatal(Caller,'Allocation error AdaptVars Values')
 
                 IF( ASSOCIATED( Solver % Variable % PrevValues ) ) THEN
                   k = SIZE( Solver % Variable % PrevValues, 2 )
                   ALLOCATE( AdaptVars(i) % Var % PrevValues( j, k ), STAT=AllocStat)
-                  IF( AllocStat /= 0 ) CALL Fatal('ExecSimulation','Allocation error for AdaptVars PrevValues')
+                  IF( AllocStat /= 0 ) CALL Fatal(Caller,'Allocation error for AdaptVars PrevValues')
                 END IF
               END DO
             END IF
@@ -2742,7 +2752,7 @@ END INTERFACE
                   ! If the next timestep will not get us home but the next one would
                   ! then split the timestep equally into two parts.
                   IF( dt - CumTime - ddt > 1.0d-12 ) THEN
-                    CALL Info('ExecSimulation','Splitted timestep into two equal parts',Level=12)
+                    CALL Info(Caller,'Splitted timestep into two equal parts',Level=12)
                     ddt = MIN( ddt, ( dt - CumTime ) / 2.0_dp )
                   END IF
                 END IF
@@ -2852,7 +2862,7 @@ END INTERFACE
 
           ELSE IF( DivergenceControl ) THEN
             ! This is still tentative 
-            CALL Info('ExecSimulation','Solving equations with divergence control',Level=6)
+            CALL Info(Caller,'Solving equations with divergence control',Level=6)
             
             CumTime = 0.0d0
             ddt = AdaptiveIncrease * ddt
@@ -2866,7 +2876,7 @@ END INTERFACE
                 ddt = MIN( dt - CumTime, ddt )
                 IF( AdaptiveSmart ) THEN
                   IF( dt - CumTime - ddt > 1.0d-12 ) THEN
-                    CALL Info('ExecSimulation','Splitted timestep into two equal parts',Level=12)
+                    CALL Info(Caller,'Splitted timestep into two equal parts',Level=12)
                     ddt = MIN( ddt, ( dt - CumTime ) / 2.0_dp )
                   END IF
                 END IF
@@ -2884,7 +2894,7 @@ END INTERFACE
                 Solver => CurrentModel % Solvers(i) 
                 IF( ASSOCIATED( Solver % Variable ) ) THEN
                   IF( Solver % Variable % NonlinConverged > 1 ) THEN
-                    CALL Info('ExecSimulation','Solver '//TRIM(I2S(i))//' has diverged',Level=8)
+                    CALL Info(Caller,'Solver '//TRIM(I2S(i))//' has diverged',Level=8)
                     HaveDivergence = .TRUE.
                     EXIT
                   END IF
@@ -2892,7 +2902,7 @@ END INTERFACE
               END DO
               
               IF( .NOT. HaveDivergence ) THEN
-                CALL Info('ExecSimulation','No solver has diverged',Level=8)
+                CALL Info(Caller,'No solver has diverged',Level=8)
 
                 ! Finally solve only the postprocessing solver after the timestep has been accepted
                 CALL SolveEquations( CurrentModel, ddt, Transient, &
@@ -2914,15 +2924,15 @@ END INTERFACE
                 !END IF
              ELSE
                IF( ddt < AdaptiveMinTimestep * (1+1.0e-8) ) THEN
-                 CALL Fatal('ExecSimulation','Could not find stable timestep above given minimum')
+                 CALL Fatal(Caller,'Could not find stable timestep above given minimum')
                END IF
 
-               CALL Info('ExecSimulation','Reducing timestep due to divergence problems!',Level=6)
+               CALL Info(Caller,'Reducing timestep due to divergence problems!',Level=6)
 
                ddt = MAX( AdaptiveDecrease * ddt, AdaptiveMinTimestep ) 
                StepControl = 1
 
-               CALL Info('ExecSimulation','Reverting to previous timestep as initial guess',Level=8)
+               CALL Info(Caller,'Reverting to previous timestep as initial guess',Level=8)
                DO i=1,nSolvers
                  Solver => CurrentModel % Solvers(i)
                  IF ( ASSOCIATED( Solver % Variable % Values ) ) THEN
@@ -3067,12 +3077,63 @@ END INTERFACE
        CALL SaveCurrent(Timestep)
      END IF
 
-
-     
 !------------------------------------------------------------------------------
    END SUBROUTINE ExecSimulation
 !------------------------------------------------------------------------------
 
+
+   
+!------------------------------------------------------------------------------
+!> This is a handle for doing parametric simulation. 
+!------------------------------------------------------------------------------
+
+   SUBROUTINE ExecSimulationFunVec(NoParam,Param,Fvec,iflag ) 
+     INTEGER, INTENT(in) :: NoParam
+     REAL(KIND=dp), INTENT(in) :: Param(NoParam)
+     REAL(KIND=dp), INTENT(out) :: Fvec(NoParam)
+     INTEGER, INTENT(inout) :: iflag
+
+     INTEGER :: i, cnt, iSweep = 0
+     LOGICAL :: Found
+     
+     iSweep = iSweep + 1
+
+     CALL Info('ExecSimulationFun','Calling Elmer as a cost function: '//TRIM(I2S(iSweep)))
+     
+     IF(iSweep==1) THEN
+       CONTINUE
+     ELSE
+       CALL ControlResetMesh(Control % Control, iSweep )            
+     END IF
+
+     ! Optionally reset the mesh if it has been modified
+     CALL ControlResetMesh(Control % Control, iSweep )            
+
+     ! Set parameters to be accessible to the MATC preprocessor when reading sif file.
+     CALL SetRealParametersMATC(NoParam,Param)
+     ! Reread the sif file for MATC changes to take effect
+     Found = ReloadInputFile(CurrentModel,RewindFile=.TRUE.)
+
+     ! Update the parameters also as coefficient as we don't know which one we are using
+     CALL SetRealParametersKeywordCoeff(NoParam,Param,cnt)
+     CALL Info('ExecSimulationFun','Set '//TRIM(I2S(cnt))//&
+         ' coefficients with parameter tags!',Level=10)
+
+     CALL InitializeIntervals()
+     CALL SetInitialConditions()
+
+     CALL ExecSimulation( TimeIntervals, CoupledMinIter, &
+         CoupledMaxIter, OutputIntervals, Transient, Scanning)
+
+     DO i=1,NoParam     
+       Fvec(i) = GetControlValue(CurrentModel % Mesh,CurrentModel % Control,i)
+     END DO
+
+     PRINT *,'Fvec:',Fvec
+
+   END SUBROUTINE ExecSimulationFunVec
+
+        
 
 !------------------------------------------------------------------------------
 !> Saves current timestep to external files.
