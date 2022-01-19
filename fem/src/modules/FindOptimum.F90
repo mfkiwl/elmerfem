@@ -96,7 +96,7 @@ SUBROUTINE FindOptimum( Model,Solver,dt,TransientSimulation )
     CALL Info('FindOptimum','Further develope the functionality on the same level as other',Level=3)
     CALL Info('FindOptimum','routines. Usually optimization should be the outermost level.',Level=3)
     CALL Info('FindOptimum','--------------------------------------------------------------')
-    CALL Warning('FindOptimum','The solver will soon be removed!')
+    CALL Warn('FindOptimum','The solver will soon be removed!')
 
     
     CALL Info('FindOptimum','Initializing solver for optimization')

@@ -513,13 +513,8 @@
        IF ( Initialize == 1 ) EXIT
 
        ExtControl = .FALSE.
-       str = ListGetString( CurrentModel % Control,'Optimization Method',Found)
-
-PRINT *,'Optimization Method:',TRIM(str)
-       
+       str = ListGetString( CurrentModel % Control,'Optimization Method',Found)       
        IF( Found ) ExtControl = ( str(1:5) == 'hybrd' .OR. str(1:6) == 'newuoa' .OR. str(1:6) == 'bobyqa' ) 
-
-       PRINT *,'Found:',Found,ExtControl
        
        ExecCommand = ListGetString( CurrentModel % Simulation, &
            'Control Procedure', ProcControl )       
