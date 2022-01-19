@@ -513,9 +513,13 @@
        IF ( Initialize == 1 ) EXIT
 
        ExtControl = .FALSE.
-       IF(DoControl) THEN
-         ExtControl = ListGetLogical(CurrentModel % Control,'External Optimization',Found )
-       END IF
+       str = ListGetString( CurrentModel % Control,'Optimization Method',Found)
+
+PRINT *,'Optimization Method:',TRIM(str)
+       
+       IF( Found ) ExtControl = ( str(1:5) == 'hybrd' .OR. str(1:6) == 'newuoa' .OR. str(1:6) == 'bobyqa' ) 
+
+       PRINT *,'Found:',Found,ExtControl
        
        ExecCommand = ListGetString( CurrentModel % Simulation, &
            'Control Procedure', ProcControl )       
@@ -525,10 +529,12 @@
          
        ELSE IF( ExtControl ) THEN
          str = ListGetString( CurrentModel % Control,'Optimization Method',UnfoundFatal=.TRUE.)
-         IF( TRIM(str) == 'hybrd') THEN          
-           CALL ExternalOptimization_HYBRD(ExecSimulationFunVec)           
-         ELSE
-           CALL Fatal('MAIN','Unknown external optimization method!', Found ) 
+         IF( str(1:5) == 'hybrd') THEN          
+           CALL ExternalOptimization_minpack(ExecSimulationFunVec)           
+         ELSE IF( str(1:6) == 'newuoa') THEN
+           CALL ExternalOptimization_newuoa(ExecSimulationFunCost)                    
+         ELSE IF( str(1:6) == 'bobyqa') THEN
+           CALL ExternalOptimization_bobyqa(ExecSimulationFunCost)                    
          END IF
            
        ELSE IF( DoControl ) THEN
@@ -3084,9 +3090,9 @@
 
    
 !------------------------------------------------------------------------------
-!> This is a handle for doing parametric simulation. 
+!> This is a handle for doing parametric simulation using minpack optimization
+!> library. The function returns a set of function values. 
 !------------------------------------------------------------------------------
-
    SUBROUTINE ExecSimulationFunVec(NoParam,Param,Fvec,iflag ) 
      INTEGER, INTENT(in) :: NoParam
      REAL(KIND=dp), INTENT(in) :: Param(NoParam)
@@ -3098,7 +3104,7 @@
      
      iSweep = iSweep + 1
 
-     CALL Info('ExecSimulationFun','Calling Elmer as a cost function: '//TRIM(I2S(iSweep)))
+     CALL Info('ExecSimulationFunVec','Calling Elmer as a cost function: '//TRIM(I2S(iSweep)))
      
      IF(iSweep==1) THEN
        CONTINUE
@@ -3116,7 +3122,7 @@
 
      ! Update the parameters also as coefficient as we don't know which one we are using
      CALL SetRealParametersKeywordCoeff(NoParam,Param,cnt)
-     CALL Info('ExecSimulationFun','Set '//TRIM(I2S(cnt))//&
+     CALL Info('ExecSimulationFunVec','Set '//TRIM(I2S(cnt))//&
          ' coefficients with parameter tags!',Level=10)
 
      CALL InitializeIntervals()
@@ -3129,11 +3135,62 @@
        Fvec(i) = GetControlValue(CurrentModel % Mesh,CurrentModel % Control,i)
      END DO
 
-     PRINT *,'Fvec:',Fvec
+     PRINT *,'Fvec:',iSweep, Fvec
 
    END SUBROUTINE ExecSimulationFunVec
 
-        
+
+!------------------------------------------------------------------------------
+!> This is a handle for doing parametric simulation with optimizers that
+!> except one single value of cost function. 
+!------------------------------------------------------------------------------
+
+   SUBROUTINE ExecSimulationFunCost(NoParam,Param,Cost) 
+     INTEGER, INTENT(in) :: NoParam
+     REAL(KIND=dp), INTENT(in) :: Param(NoParam)
+     REAL(KIND=dp), INTENT(out) :: Cost
+
+     INTEGER :: i, cnt, iSweep = 0
+     LOGICAL :: Found
+     
+     iSweep = iSweep + 1
+
+     CALL Info('ExecSimulationFunCost','Calling Elmer as a cost function: '//TRIM(I2S(iSweep)))
+     
+     IF(iSweep==1) THEN
+       CONTINUE
+     ELSE
+       CALL ControlResetMesh(Control % Control, iSweep )            
+     END IF
+
+     ! Optionally reset the mesh if it has been modified
+     CALL ControlResetMesh(Control % Control, iSweep )            
+
+     ! Set parameters to be accessible to the MATC preprocessor when reading sif file.
+     CALL SetRealParametersMATC(NoParam,Param)
+     ! Reread the sif file for MATC changes to take effect
+     Found = ReloadInputFile(CurrentModel,RewindFile=.TRUE.)
+
+     ! Update the parameters also as coefficient as we don't know which one we are using
+     CALL SetRealParametersKeywordCoeff(NoParam,Param,cnt)
+     CALL Info('ExecSimulationFunCost','Set '//TRIM(I2S(cnt))//&
+         ' coefficients with parameter tags!',Level=10)
+
+     CALL InitializeIntervals()
+     CALL SetInitialConditions()
+
+     CALL ExecSimulation( TimeIntervals, CoupledMinIter, &
+         CoupledMaxIter, OutputIntervals, Transient, Scanning)
+
+     CALL GetCostFunction(CurrentModel % Control,Cost,Found)
+     IF(.NOT. Found ) THEN
+       CALL Fatal('ExecSimulationFunCost','Could not find cost function!')
+     END IF
+     
+     PRINT *,'Cost:',iSweep, Cost
+
+   END SUBROUTINE ExecSimulationFunCost
+   
 
 !------------------------------------------------------------------------------
 !> Saves current timestep to external files.

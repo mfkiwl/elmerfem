@@ -12,9 +12,8 @@ MODULE OptimizationUtils
   USE Lists
   USE ModelDescription
   USE Messages
-  USE minpack_module
 
-  
+    
   IMPLICIT NONE
 
   PUBLIC :: GetCostFunction
@@ -22,7 +21,13 @@ MODULE OptimizationUtils
   PUBLIC :: SetTabulatedParameters
   PUBLIC :: SetOptimizationParameters
   PUBLIC :: ControlResetMesh
+  PUBLIC :: ExternalOptimization_minpack
+  PUBLIC :: ExternalOptimization_newuoa
+  PUBLIC :: ExternalOptimization_bobyqa
 
+  PRIVATE :: SaveCurrentOptimum
+  PRIVATE :: GetSavedOptimum
+  
 CONTAINS
 
   ! Obtains cost function value that has must be given
@@ -70,8 +75,88 @@ CONTAINS
   END SUBROUTINE GetCostFunction
 
 
+  !> This subroutine may be used to continue the optimization from the previous best value.
+  !--------------------------------------------------------------------------------------
+  SUBROUTINE GetSavedOptimum(OptList,x,Found)
+    !------------------------------------------------------------------------------
+    TYPE(ValueList_t), POINTER :: OptList
+    REAL(KIND=dp) :: x(:)
+    LOGICAL :: Found
+
+    INTEGER :: i,n
+    CHARACTER(LEN=MAX_NAME_LEN) :: Name
+    LOGICAL :: fileis, GotIt, OptimalStart
+    INTEGER :: IOUnit
+
+    Found = .FALSE.
+
+    OptimalStart = ListGetLogical(OptList,'Optimal Restart',GotIt )
+    IF(.NOT. GotIt ) OptimalStart = ListCheckPresent( OptList,'Parameter Restart File' )
+    IF(.NOT. OptimalStart) RETURN
+
+    Name = ListGetString(OptList,'Parameter Restart File',GotIt )
+    IF(.NOT. GotIt) Name = "optimize-best.dat"
+    
+    CALL Info('GetSavedOptimum','Trying to use previous optimal  parameters: '//TRIM(Name),Level=6)
+    INQUIRE (FILE=Name, EXIST=fileis)
+
+    IF(.NOT. fileis ) THEN
+      CALL Warn('GetSavedOptimum','Previous optimum was not found in: '//TRIM(Name))
+      RETURN
+    END IF
+
+    x = 0.0_dp
+    
+    OPEN(NEWUNIT=IOUnit,FILE=Name)
+    READ (IOUnit,*) n
+    n = MIN(n,SIZE(x))
+    READ (IOUnit,*) x(1:n)
+    CLOSE(IOUnit)
+
+    Found = .TRUE.
+    
+    CALL Info('GetSavedOptimum','Number of parameters initialized from file: '//TRIM(I2S(n)),Level=6)
+
+  END SUBROUTINE GetSavedOptimum
+
+
+
+  ! We may save the current optimum so that restarting is easier.
+  !----------------------------------------------------------------
+  SUBROUTINE SaveCurrentOptimum(OptList,n,rpar,Cost,Iters,Improvements) 
+    TYPE(ValueList_t), POINTER :: OptList
+    INTEGER :: n
+    REAL(KIND=dp) :: rpar(:)
+    REAL(KIND=dp), OPTIONAL :: Cost
+    INTEGER, OPTIONAL :: Iters
+    INTEGER, OPTIONAL :: Improvements
+
+    INTEGER :: IOUnit
+    CHARACTER(LEN=MAX_NAME_LEN) :: Name
+    LOGICAL :: GotIt
+    
+    Name = ListGetString(OptList,'Parameter Best File',GotIt )
+    IF(.NOT. GotIt) RETURN
+    
+    CALL Info('SaveCurrentOptimum','Saving current optimum for later use!',Level=6)
+    OPEN( NEWUNIT=IOUnit, FILE=Name, STATUS='UNKNOWN')
+    WRITE (IOUnit,'(I0,T20,A)') n,'! Number of parameters'
+    WRITE (IOUnit,*)         rpar(1:n)
+
+    IF( PRESENT(Cost) )  &
+        WRITE (IOUnit,'(ES12.6,T20,A)') Cost,'! Cost'
+    IF( PRESENT(Iters) )  &
+        WRITE (IOUnit,'(I0,T20,A)')   Iters,'! Iterations'
+    IF( PRESENT(Improvements) )  &
+        WRITE (IOUnit,'(I0,T20,A)')  Improvements,'! Improvements'
+    CLOSE(IOUnit)
+    
+  END SUBROUTINE SaveCurrentOptimum
   
-  SUBROUTINE ExternalOptimization_HYBRD(funvec)
+  
+  SUBROUTINE ExternalOptimization_minpack(funvec)
+
+    USE minpack_module
 
     IMPLICIT NONE 
     
@@ -89,7 +174,7 @@ CONTAINS
     
     niter = ListGetInteger( OptList,'Run Control Iterations', Found )
     npar = ListGetInteger( OptList,'Parameter Count',Found )
-    xtol = ListGetConstReal( OptList,'Run Control Tolerance',Found)
+    xtol = ListGetConstReal( OptList,'Optimization Tolerance',Found)
     IF(.NOT. Found ) xtol = 1.0e-6
     epsfcn = ListGetConstReal( OptList,'Run Control Variation',Found )
     IF(.NOT. Found) epsfcn = 0.01_dp
@@ -97,13 +182,18 @@ CONTAINS
     ALLOCATE(rpar(niter),fvec(niter))        
     rpar = 1.0_dp
     fvec = 0.0_dp
-    
-    DO i=1,npar
-      str = 'Initial Parameter '//TRIM(I2S(i))
-      rpar(i) = ListGetConstReal(OptList,str,Found) 
-    END DO
-    
+
+    CALL GetSavedOptimum(OptList,rpar,Found)
+    IF(.NOT. Found ) THEN    
+      DO i=1,npar
+        str = 'Initial Parameter '//TRIM(I2S(i))
+        rpar(i) = ListGetConstReal(OptList,str,Found) 
+      END DO
+    END IF
+      
     CALL MinPack_HYBRD_Wrapper(npar,npar,rpar,fvec,niter,xtol,epsfcn)
+
+    CALL SaveCurrentOptimum(OptList,npar,rpar)
 
   CONTAINS
     
@@ -157,12 +247,134 @@ CONTAINS
           Wa2, Wa3, Wa4)
 
     END SUBROUTINE MinPack_HYBRD_Wrapper
-       
-
-  END SUBROUTINE ExternalOptimization_HYBRD
+             
+  END SUBROUTINE ExternalOptimization_Minpack
 
 
   
+  SUBROUTINE ExternalOptimization_newuoa(funcost)
+
+    USE newuoa_module
+
+    IMPLICIT NONE 
+      
+    PROCEDURE(func) :: funcost
+    INTEGER :: i,npar,npt,niter,iprint 
+    
+    REAL(KIND=dp), ALLOCATABLE :: rpar(:)
+    REAL(KIND=dp) :: xtol, rhobeg, rhoend, minv, maxv
+    CHARACTER(LEN=MAX_NAME_LEN) :: str
+    TYPE(ValueList_t), POINTER :: OptList
+    LOGICAL :: Found, Found2
+
+    CALL Info('ExternalOptimization','Calling NEWUOA from PowellOpt package')
+
+    OptList => CurrentModel % Control
+    
+    niter = ListGetInteger( OptList,'Run Control Iterations', Found )
+    npar = ListGetInteger( OptList,'Parameter Count',Found )
+    xtol = ListGetConstReal( OptList,'Optimization Tolerance',Found)
+    IF(.NOT. Found ) xtol = 1.0e-6
+
+    npt = ListGetInteger( OptList,'Powell Interpolation Conditions', Found )
+    npt = MIN(MAX(npar+2,npt),(npar+1)*(npar+2)/2)
+    
+    rhobeg = ListGetConstReal( OptList,'Initial Stepsize',UnfoundFatal=.TRUE.)
+    rhoend = ListGetConstReal( OptList,'Min Stepsize',UnfoundFatal=.TRUE.)
+    
+    ALLOCATE(rpar(npar))
+    rpar = 1.0_dp
+    
+    CALL GetSavedOptimum(OptList,rpar,Found)    
+
+    IF(.NOT. Found ) THEN
+      DO i=1,npar
+        str = 'Initial Parameter '//TRIM(I2S(i))
+        rpar(i) = ListGetConstReal(OptList,str,Found)
+        IF(.NOT. Found ) THEN
+          str = 'Min Parameter '//TRIM(I2S(i))
+          minv = ListGetCReal(OptList,str,Found)
+          str = 'Max Parameter '//TRIM(I2S(i))
+          maxv = ListGetCReal(OptList,str,Found2) 
+          IF(Found .AND. Found2 ) THEN
+            rpar(i) = (minv+maxv) / 2
+          ELSE
+            CALL Fatal('ExternalOptimization','Give either "Initial Parameter" or min/max range')
+          END IF
+        END IF
+      END DO
+    END IF
+      
+    i = ListGetInteger(CurrentModel % Simulation,'Max Output Level',Found )
+    iprint = MIN(i/5,3) 
+        
+    CALL newuoa (npar, npt, rpar, rhobeg, rhoend, iprint, niter, funcost )
+    
+    CALL SaveCurrentOptimum(OptList,npar,rpar)
+
+  END SUBROUTINE ExternalOptimization_newuoa
+
+
+  SUBROUTINE ExternalOptimization_bobyqa(funcost)
+
+    USE bobyqa_module
+
+    IMPLICIT NONE 
+      
+    PROCEDURE(func) :: funcost
+    INTEGER :: i,npar,npt,niter,iprint 
+    
+    REAL(KIND=dp), ALLOCATABLE :: rpar(:),xl(:),xu(:)
+    REAL(KIND=dp) :: xtol, rhobeg, rhoend
+    CHARACTER(LEN=MAX_NAME_LEN) :: str
+    TYPE(ValueList_t), POINTER :: OptList
+    LOGICAL :: Found
+
+    CALL Info('ExternalOptimization','Calling BOBYQA from PowellOpt package')
+
+    OptList => CurrentModel % Control
+    
+    niter = ListGetInteger( OptList,'Run Control Iterations', Found )
+    npar = ListGetInteger( OptList,'Parameter Count',Found )
+    xtol = ListGetConstReal( OptList,'Optimization Tolerance',Found)
+    IF(.NOT. Found ) xtol = 1.0e-6
+
+    npt = ListGetInteger( OptList,'Optimization Interpolation Conditions', Found )
+    npt = MIN(MAX(npar+2,npt),(npar+1)*(npar+2)/2)
+    
+    rhobeg = ListGetConstReal( OptList,'Initial Stepsize',UnfoundFatal=.TRUE.)
+    rhoend = ListGetConstReal( OptList,'Min Stepsize',UnfoundFatal=.TRUE.)
+    
+    ALLOCATE(rpar(npar),xl(npar),xu(npar))
+    rpar = 1.0_dp
+    
+    DO i=1,npar
+      str = 'Min Parameter '//TRIM(I2S(i))
+      xl(i) = ListGetCReal(OptList,str,UnfoundFatal=.TRUE.)
+      str = 'Max Parameter '//TRIM(I2S(i))
+      xu(i) = ListGetCReal(OptList,str,UnfoundFatal=.TRUE.)
+      str = 'Initial Parameter '//TRIM(I2S(i))
+    END DO
+    
+    CALL GetSavedOptimum(OptList,rpar,Found)
+    IF(.NOT. Found ) THEN
+      DO i=1,npar
+        rpar(i) = ListGetConstReal(OptList,str,Found)
+        IF(.NOT. Found) rpar(i) = (xl(i)+xu(i))/2
+      END DO
+    END IF
+      
+    i = ListGetInteger(CurrentModel % Simulation,'Max Output Level',Found )
+    iprint = MIN(i/5,3) 
+
+    CALL bobyqa (npar, npt, rpar, xl, xu, rhobeg, rhoend, iprint, niter, funcost )
+
+    CALL SaveCurrentOptimum(OptList,npar,rpar)
+
+    
+  END SUBROUTINE ExternalOptimization_bobyqa
+
+
 !------------------------------------------------------------------------------
 !> Adds parameters used in the simulation either predefined or from run control.
 !> The idea is to make parametrized simulations more simple to perform. 
@@ -178,7 +390,7 @@ CONTAINS
    LOGICAL, OPTIONAL :: PostSimulation
    LOGICAL, OPTIONAL :: SetCoeffs
 
-   LOGICAL :: DoOptim, OptimalFinish, OptimalStart, ExternalOpt
+   LOGICAL :: DoOptim, OptimalFinish, OptimalStart
    INTEGER :: NoParam, NoValues, cnt
    REAL(KIND=dp), ALLOCATABLE :: Param(:), BestParam(:)
    REAL(KIND=dp) :: Cost = HUGE( Cost ) 
@@ -187,9 +399,7 @@ CONTAINS
 
    SAVE Cost, Param, BestParam
 
-   
-   ExternalOpt = ListGetLogical( Params,'External Optimization',Found ) 
-   
+     
    NoParam = ListGetInteger( Params,'Parameter Count',Found )
    IF(.NOT. Found ) THEN
      NoParam = ListGetInteger( Params,'Number of Parameters',Found)
@@ -239,19 +449,18 @@ CONTAINS
    !-------------------------------------------------------------------
    DoOptim = ListCheckPresent( Params,'Optimization Method')
    OptimalStart = ListGetLogical(Params,'Optimal Restart',Found )
-   OptimalFinish = ListGetLogical( Params,'Parameter Optimal Finish',Found ) 
+   OptimalFinish = ListGetLogical( Params,'Optimal Finish',Found ) 
 
-   IF( ExternalOpt ) THEN
-     CONTINUE
-   ELSE IF( OptimalStart .AND. piter == 1 ) THEN
-     CALL Info(Caller,'Trying to read previous optimal values from a file!')     
-     CALL GetSavedOptimum()  
-   ELSE IF( OptimalFinish .AND. piter == NoValues ) THEN
+   IF( OptimalFinish .AND. piter == NoValues ) THEN
      CALL Info(Caller,'Performing the last step with the best so far')
      Param = BestParam
    ELSE IF( DoOptim ) THEN
-     CALL SetOptimizationParameters(Params,piter,GotParams,FinishEarly,&
-         NoParam,Param,Cost)
+     Found = .FALSE.
+     IF( piter == 1 ) CALL GetSavedOptimum(Params,Param,Found)
+     IF(.NOT. Found ) THEN
+       CALL SetOptimizationParameters(Params,piter,GotParams,FinishEarly,&
+           NoParam,Param,Cost)
+     END IF
    ELSE
      CALL SetTabulatedParameters(Params,piter,GotParams,FinishEarly,&
          NoParam,Param)
@@ -269,6 +478,9 @@ CONTAINS
 
  CONTAINS
 
+
+
+   
 
    ! We may register the current optimum and save it for later use.
    ! Then when starting over we may continue from the best so far.
@@ -295,21 +507,7 @@ CONTAINS
      WRITE(Message,'(A,ES15.6E3)') 'Found New Minimum Cost:',MinCost
      CALL Info(Caller,Message,Level=4)
      
-     Name = ListGetString(OptList,'Parameter Best File',GotIt )
-     IF( GotIt ) THEN
-       OPEN( NEWUNIT=IOUnit, FILE=Name, STATUS='UNKNOWN')
-       WRITE (IOUnit,'(A,ES17.8E3)') 'Cost: ',Cost
-       WRITE (IOUnit,'(A,I0)') 'Improvements: ',NoBetter
-       WRITE (IOUnit,'(A,I0)') 'Iterations: ',piter
-       WRITE (IOUnit,'(A,I0)') 'NoParam: ',NoParam
-       DO i=1,NoParam
-         WRITE (IOUnit,'(ES17.8E3)') Param(i)
-       END DO
-       CLOSE(IOUnit)
-     END IF
-        
-     WRITE( Message, '(A,ES15.6E3)' ) 'Lowest cost so far: ',MinCost
-     CALL Info(Caller,Message,Level=5)
+     CALL SaveCurrentOptimum(OptList,NoParam,BestParam,Cost,piter,NoBetter)
 
    END SUBROUTINE RegisterCurrentOptimum
 
@@ -345,46 +543,6 @@ CONTAINS
      CLOSE(IOUnit)
 
    END SUBROUTINE SaveParameterHistory
-
-
-   !> This subroutine may be used to continue the optimization from the previous best value.
-   !--------------------------------------------------------------------------------------
-   SUBROUTINE GetSavedOptimum( )
-     !------------------------------------------------------------------------------
-     INTEGER :: i,n
-     REAL(KIND=dp) :: parami
-     REAL(KIND=dp), ALLOCATABLE :: guessparam(:)
-     CHARACTER(LEN=MAX_NAME_LEN) :: Name
-     LOGICAL :: fileis, GotIt
-     INTEGER :: IOUnit
-
-     Name = ListGetString(Params,'Parameter Restart File',GotIt )
-     IF(.NOT. GotIt) THEN
-       Name = 'optimize-best.dat'
-       CALL Info(Caller,'Using default value for optimal parameters: '//TRIM(Name),Level=6)
-     END IF
-       
-     INQUIRE (FILE=Name, EXIST=fileis)
-
-     IF(.NOT. fileis ) THEN
-       CALL Warn(Caller,'Previous optimum was not found in: '//TRIM(Name))
-       RETURN
-     END IF
-     
-     OPEN(NEWUNIT=IOUnit,FILE=Name)
-     READ (IOUnit,*) n
-     ALLOCATE (guessparam(n))
-     DO i=1,n
-       READ (IOUnit,*) guessparam(i)
-     END DO
-     CLOSE(IOUnit)
-
-     n = MIN( n, SIZE( param) )
-     param(1:n) = guessparam(1:n)
-
-     CALL Info(Caller,'Number of parameters initialized from file: '//TRIM(I2S(n)),Level=6)
-
-     END SUBROUTINE GetSavedOptimum
       
  END SUBROUTINE ControlParameters
 
@@ -684,7 +842,10 @@ CONTAINS
 
     CASE ('simplex')    
       CALL SimplexOptimize( NoParam, Param, Cost, MinParam, MaxParam, dParam )
-
+      
+    CASE ('hybrd','newuoa','bobyqa')
+      CALL Info(Caller,'Using external function for optimization!',Level=8)
+      
     CASE DEFAULT
       CALL Fatal(Caller,'Unknown method')
 
@@ -869,7 +1030,7 @@ CONTAINS
       no = no + 1
 
       IF(no == 1) THEN
-        step = ListGetConstReal(OptList,'Initial Step Size',GotIt)
+        step = ListGetConstReal(OptList,'Initial Stepsize',GotIt)
         IF(.NOT. GotIt) step = (MaxParam(j)-Param(j))/2.0
         step = MIN((MaxParam(j)-Param(j))/2.0,step)
       END IF
@@ -951,10 +1112,10 @@ CONTAINS
       no = no + 1
 
       IF(no == 1) THEN
-        maxstep = ListGetConstReal(OptList,'Max Step Size',GotIt)
-        step = ListGetConstReal(OptList,'Initial Step Size',GotIt)
+        maxstep = ListGetConstReal(OptList,'Max StepSize',GotIt)
+        step = ListGetConstReal(OptList,'Initial StepSize',GotIt)
         IF(.NOT. GotIt) step = 1.0d-3*(MaxParam(j)-MinParam(j))
-        relax = ListGetConstReal(OptList,'Step Size Relaxation Factor',GotIt)
+        relax = ListGetConstReal(OptList,'StepSize Relaxation Factor',GotIt)
         IF(.NOT. GotIt) Relax = 1.0_dp
       END IF
 

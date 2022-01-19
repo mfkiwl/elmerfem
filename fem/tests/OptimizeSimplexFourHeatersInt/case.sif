@@ -43,9 +43,9 @@ Run Control
   !Simplex Restart Interval = Integer 20
   !Simplex Restart Convergence Ratio = Real 1.0
 
-  !Initial Step Size = Real
-  !Max Step Size = Real
-  !Step Size Relaxation Factor = Real
+  !Initial Stepsize = Real
+  !Max Stepsize = Real
+  !Stepsize Relaxation Factor = Real
 
   Max Output Level = 5 
 End 
