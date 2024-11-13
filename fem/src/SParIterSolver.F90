@@ -2055,6 +2055,10 @@ SUBROUTINE SParIterSolver( SourceMatrix, ParallelInfo, XVec, &
   !
   !------------------------------------------------------------------
 
+  CALL Info(Caller,'Copying Matrix values into SplittedMatrix',Level=20)
+  CALL ResetTimer('SplittedMatrix')
+
+  
   GT => SplittedMatrix % GlueTable
   DO i = 1, SourceMatrix % NumberOfRows
      GRow = ParallelInfo % GlobalDOFs(i)
@@ -2154,12 +2158,14 @@ SUBROUTINE SParIterSolver( SourceMatrix, ParallelInfo, XVec, &
   END DO
 
   CALL GlueFinalize( SourceMatrix, SplittedMatrix, ParallelInfo )
+  CALL CheckTimer('SplittedMatrix',Level=7,Delete=.TRUE.)
+
 
   !------------------------------------------------------------------
-  !
   ! Call the actual solver routine (based on older design)
-  !
   !------------------------------------------------------------------
+  CALL Info(Caller,'Going into actual parallel solution',Level=20)
+
   CALL Solve( SourceMatrix, SParMatrixDesc % SplittedMatrix, &
          ParallelInfo, RHSVec, XVec, Solver, Errinfo )
 
@@ -2436,9 +2442,7 @@ SUBROUTINE Solve( SourceMatrix, SplittedMatrix, ParallelInfo, &
   PIGpntr => GlobalData
 
   !----------------------------------------------------------------------
-  !
   ! Initialize Right-Hand-Side
-  !
   !----------------------------------------------------------------------
   ALLOCATE(TmpRHSVec(SplittedMatrix % InsideMatrix % NumberOfRows))
   TmpRHSVec = 0
@@ -2495,12 +2499,10 @@ SUBROUTINE Solve( SourceMatrix, SplittedMatrix, ParallelInfo, &
 
   GlobalMatrix % Ematrix => SourceMatrix
   GlobalMatrix % COMPLEX = SourceMatrix % COMPLEX
- !----------------------------------------------------------------------
- !
- ! Set up the preconditioner
- !
- !----------------------------------------------------------------------
 
+ !----------------------------------------------------------------------
+ ! Set up the preconditioner
+ !----------------------------------------------------------------------
  IF (SplittedMatrix % InsideMatrix % NumberOFRows>0) THEN
 !  IF (SplittedMatrix % InsideMatrix % Diag(1)==0) THEN
      DO i = 1, SplittedMatrix % InsideMatrix % NumberOfRows
@@ -2533,11 +2535,8 @@ SUBROUTINE Solve( SourceMatrix, SplittedMatrix, ParallelInfo, &
 
 
  !----------------------------------------------------------------------
- !
  ! Call the main iterator routine
- !
  !----------------------------------------------------------------------
-
   CM => SourceMatrix % ConstraintMatrix
   IF (ASSOCIATED(CM)) THEN
     ALLOCATE(SPerm(SourceMatrix % NumberOfRows)); SPerm=0
@@ -2576,9 +2575,7 @@ SUBROUTINE Solve( SourceMatrix, SplittedMatrix, ParallelInfo, &
   GlobalMatrix => SaveMatrix
 
   !----------------------------------------------------------------------
-  !
   ! Collect the result
-  !
   !----------------------------------------------------------------------
   ALLOCATE( VecEPerNB( ParEnv % PEs ) )
   VecEPerNB = 0
@@ -2609,12 +2606,10 @@ SUBROUTINE Solve( SourceMatrix, SplittedMatrix, ParallelInfo, &
   END DO
 
   CALL ExchangeResult( SourceMatrix,SplittedMatrix,ParallelInfo,XVec )
-  !----------------------------------------------------------------------
-  !
-  ! Clean the work space
-  !
-  !----------------------------------------------------------------------
 
+  !----------------------------------------------------------------------
+  ! Clean the work space
+  !----------------------------------------------------------------------
   DEALLOCATE( TmpXVec, TmpRHSVec, VecEPerNB )
 !----------------------------------------------------------------------
 END SUBROUTINE Solve

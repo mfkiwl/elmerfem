@@ -553,6 +553,18 @@ CONTAINS
       ELSE IF ( Section == 'run' ) THEN
          IF ( PRESENT(runc) ) runc=.TRUE.
          EXIT
+      ELSE IF ( Section == 'stop' ) THEN
+        CALL Warn(Caller,'Encountered "STOP" in sif, rest will be ignored!')
+        EXIT
+      ELSE IF( Section == '/*' ) THEN
+        CALL Info(Caller,'Starting comment section!')
+        DO WHILE( ReadAndTrim( InFileUnit, Section, Echo ) )
+          IF ( Section == '*/' ) THEN
+            CALL Info(Caller,'Finished comment section!')
+            EXIT                      
+          END IF
+        END DO
+        CYCLE        
       END IF
 
       FreeNames = ( CheckAbort <= 0 )
@@ -4275,6 +4287,7 @@ CONTAINS
       CALL Info(Caller,'Number of variable to read is: '//I2S(j),Level=10)
       IF( ALLOCATED( ListVariableFound ) ) DEALLOCATE( ListVariableFound ) 
       ALLOCATE( ListVariableFound(j) )
+      ListVariableFound = .FALSE.
       CALL Info(Caller,'Reading only '//I2S(j)//' variables given by: "Restart Variable i"',Level=10)
     ELSE
       CALL Info(Caller,'Reading all variables (if not wanted use "Restart Variable i" )',Level=10)      
@@ -4558,10 +4571,9 @@ CONTAINS
       !-------------------------------
       LoadThis = .TRUE.
       
-      ! If list is give check that variable is on the list.
+      ! If list is given check that variable is on the list.
       !---------------------------------------------------------------------------
       IF( ListVariableCount > 0  ) THEN
-        ListVariableFound = .FALSE.
         DO j=1,ListVariableCount
           LoadThis = .FALSE.
           VarName2 = ListGetString( ResList,'Restart Variable '//I2S(j), Found )

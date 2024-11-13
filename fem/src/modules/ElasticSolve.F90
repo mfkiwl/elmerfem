@@ -110,7 +110,6 @@ SUBROUTINE ElasticSolver_Init( Model,Solver,dt,Transient )
       DOFs = dim
       CALL ListAddString( SolverParams, 'Variable', 'Displacement' )
     END IF
-
     CALL ListAddInteger( SolverParams, 'Variable DOFs', DOFs )
   END IF
 
@@ -2591,8 +2590,8 @@ CONTAINS
     !------------------------------------------------------------------------------
     IF( MixedFormulation ) THEN
 
-      IF (PlaneStress) CALL Warn( Caller,  &
-          'Mixed formulation does not support plane stress: plane strain assumed instead' )
+      IF (PlaneStress) CALL Fatal( Caller,  &
+          'Mixed formulation does not support plane stress')
 
       DOFs = cdim + 1
       ! To reuse the code, set the lambda parameter to zero and instead

@@ -218,7 +218,7 @@ CONTAINS
      CHARACTER(LEN=*) :: Equation
      LOGICAL, OPTIONAL :: DGSolver, GlobalBubbles
 !------------------------------------------------------------------------------
-     INTEGER i,j,l,t,n,e,k,k1, MaxNDOFs, MaxEDOFs, MaxFDOFs, BDOFs, ndofs, el_id
+     INTEGER i,j,l,t,n,m,e,k,k1, MaxNDOFs, MaxEDOFs, MaxFDOFs, BDOFs, ndofs, el_id
      INTEGER :: NodalIndexOffset, EdgeIndexOffset, FaceIndexOffset, Indexes(128)
      INTEGER, POINTER :: Def_Dofs(:)
      INTEGER, ALLOCATABLE :: EdgeDOFs(:), FaceDOFs(:)
@@ -643,7 +643,9 @@ CONTAINS
          ELSE       
            Solver % PeriodicFlipActive = .FALSE.
            n = SIZE( Mesh % PeriodicPerm )
-           IF( n < SIZE( Perm ) ) THEN
+           m = SIZE( Perm )
+           
+           IF( n < m ) THEN
              CALL Info(Caller,'Increasing size of periodic tables from '&
                  //I2S(n)//' to '//I2S(SIZE(Perm))//'!',Level=7)
              ALLOCATE( TmpPerm(SIZE(Perm)) )
@@ -664,17 +666,17 @@ CONTAINS
            n = 0
            IF( ASSOCIATED( Mesh % PeriodicPerm ) ) THEN
              ! Set the eliminated dofs to zero and renumber
-             WHERE( Mesh % PeriodicPerm > 0 ) Perm = -Perm
+             WHERE( Mesh % PeriodicPerm(1:m) > 0 ) Perm = -Perm
              
              k = 0                  
-             DO i=1,SIZE( Perm )
+             DO i=1,m
                IF( Perm(i) > 0 ) THEN
                  k = k + 1
                  Perm(i) = k
                END IF
              END DO
              
-             DO i=1,SIZE( Mesh % PeriodicPerm )
+             DO i=1,m
                j = Mesh % PeriodicPerm(i)
                IF( j > 0 ) THEN
                  IF( Perm(i) /= 0 ) THEN             
@@ -8698,8 +8700,11 @@ CONTAINS
      
      Val3D = 0.0_dp
 
-     IF( .NOT. ASSOCIATED( Handle % Variable ) ) RETURN
-     
+     IF( .NOT. ASSOCIATED( Handle % Variable ) ) THEN
+       IF(PRESENT(Found)) Found = .FALSE.
+       RETURN
+     END IF
+       
      IF( PRESENT( dofs ) ) THEN
        Ldofs = dofs
      ELSE

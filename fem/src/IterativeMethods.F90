@@ -1205,6 +1205,9 @@ CONTAINS
 
     REAL(KIND=dp), POINTER :: x(:),b(:)
 
+    CALL Info('Itermetod_gcr','Starting GCR iteration',Level=25)
+
+    
     ndim = HUTI_NDIM
     Rounds = HUTI_MAXIT
     MinIter = HUTI_MINIT
@@ -1944,6 +1947,8 @@ CONTAINS
     INTEGER :: Rounds, OutputInterval
     REAL(KIND=dp) :: MinTol, MaxTol, Residual
     LOGICAL :: Converged, Diverged, UseStopCFun
+
+    CALL Info('Itermetod_z_gcr','Starting GCR iteration',Level=25)
     
     ndim = HUTI_NDIM
     Rounds = HUTI_MAXIT
@@ -1989,27 +1994,28 @@ CONTAINS
       LOGICAL :: Converged, Diverged
       REAL(KIND=dp) :: MinTolerance, MaxTolerance, Residual
       INTEGER :: n, OutputInterval, m
+!------------------------------------------------------------------------------      
       REAL(KIND=dp) :: bnorm,rnorm
       COMPLEX(KIND=dp), ALLOCATABLE :: R(:)
-
       COMPLEX(KIND=dp), ALLOCATABLE :: S(:,:), V(:,:), T1(:), T2(:)
-
-!------------------------------------------------------------------------------
       INTEGER :: i,j,k,allocstat
-      COMPLEX(KIND=dp) :: beta
+      COMPLEX(KIND=dp) :: beta, czero
       REAL(KIND=dp) :: alpha, trueresnorm, normerr
-      COMPLEX(KIND=dp) :: trueres(n)
+      COMPLEX(KIND=dp), ALLOCATABLE :: trueres(:)
 !------------------------------------------------------------------------------
             
-      ALLOCATE( R(n), T1(n), T2(n) )
-      IF ( m > 1 ) THEN
+      ALLOCATE( R(n), T1(n), T2(n), trueres(n), STAT=allocstat )
+      IF( allocstat /= 0) &
+          CALL Fatal('GCR_Z','Failed to allocate memory of size: '//I2S(n))
+      IF ( m > 1 ) THEN        
          ALLOCATE( S(n,m-1), V(n,m-1), STAT=allocstat )
          IF ( allocstat /= 0 ) THEN
            CALL Fatal('GCR_Z','Failed to allocate memory of size: '&
                //I2S(n)//' x '//I2S(m-1))
          END IF
-         V(1:n,1:m-1) = CMPLX( 0.0d0, 0.0d0, kind=dp)
-         S(1:n,1:m-1) = CMPLX( 0.0d0, 0.0d0, kind=dp)
+         czero = CMPLX( 0.0_dp, 0.0_dp )
+         V(1:n,1:m-1) = czero
+         S(1:n,1:m-1) = czero
       END IF	
       
       CALL matvecsubr( x, r, ipar )

@@ -429,7 +429,7 @@ SUBROUTINE EMPortSolver_Post(Model, Solver, dt, Transient)
   TYPE(Nodes_t), SAVE :: Nodes
   CHARACTER(*), PARAMETER :: Caller = 'EMPortSolver_Post'
   LOGICAL :: PiolaVersion, stat
-  INTEGER :: soln, i, j, k, n, nd, EdgeBasisDegree
+  INTEGER :: soln, i, j, k, n, nd, EdgeBasisDegree, normal_ind(1)
   INTEGER :: DOFs, vdofs, p, q, ModeIndex
   INTEGER, POINTER, SAVE :: Ind(:) => NULL()
   REAL(KIND=dp), ALLOCATABLE, TARGET :: Mass(:,:), Force(:)  
@@ -440,7 +440,7 @@ SUBROUTINE EMPortSolver_Post(Model, Solver, dt, Transient)
   
   REAL(KIND=dp) :: u, v, w, detJ, s
   
-  REAL(KIND=dp) :: xq, ReEz, ImEz, ReE(3), ImE(3), ReV(3), ImV(3) 
+  REAL(KIND=dp) :: xq, ReEz, ImEz, ReE(3), ImE(3), ReV(3), ImV(3), Normal(3) 
   REAL(KIND=dp) :: Norm
 
   
@@ -479,7 +479,7 @@ SUBROUTINE EMPortSolver_Post(Model, Solver, dt, Transient)
   ModeIndex = ListGetInteger(Params, 'Mode Index', Found)
 !  print *, 'processing eigenvalue', PrimSolver % Variable % Eigenvalues(ModeIndex)
 
-  Beta = -im * SQRT(PrimSolver % Variable % Eigenvalues(ModeIndex))
+  Beta = SQRT(-PrimSolver % Variable % Eigenvalues(ModeIndex))
 !  print *, 'propagation parameter beta', Beta
   
   DO k=1, GetNOFActive()
@@ -493,6 +493,13 @@ SUBROUTINE EMPortSolver_Post(Model, Solver, dt, Transient)
 
     CALL GetElementNodes( Nodes )
 
+    ! At the moment we assume that the wave propagates in the direction of some
+    ! coordinate axis. Then the following check should be enough to get the positive
+    ! direction of wave propagation: 
+    Normal = NormalVector(Element, Nodes)
+    normal_ind = MAXLOC(ABS(Normal))
+    IF (Normal(normal_ind(1)) < 0.0_dp) Normal = -Normal
+    
     CALL GetScalarLocalEigenmode(re_local_field, 'e re', Element, PrimSolver, ModeIndex, ComplexPart=.FALSE.)
     CALL GetScalarLocalEigenmode(im_local_field, 'e im', Element, PrimSolver, ModeIndex, ComplexPart=.FALSE.)
     
@@ -538,17 +545,17 @@ SUBROUTINE EMPortSolver_Post(Model, Solver, dt, Transient)
           END DO
           SELECT CASE(j)
           CASE(1)
-            Force((p-1)*DOFs+1) = Force((p-1)*DOFs+1) + s * ReE(1) * Basis(p)
+            Force((p-1)*DOFs+1) = Force((p-1)*DOFs+1) + s * (ReE(1) + Normal(1)*ReEz) * Basis(p)
           CASE(2)
-            Force((p-1)*DOFs+2) = Force((p-1)*DOFs+2) + s * ReE(2) * Basis(p)
+            Force((p-1)*DOFs+2) = Force((p-1)*DOFs+2) + s * (ReE(2) + Normal(2)*ReEz) * Basis(p)
           CASE(3)
-            Force((p-1)*DOFs+3) = Force((p-1)*DOFs+3) + s * ReEz * Basis(p)
+            Force((p-1)*DOFs+3) = Force((p-1)*DOFs+3) + s * (ReE(3) + Normal(3)*ReEz) * Basis(p)
           CASE(4)
-            Force((p-1)*DOFs+4) = Force((p-1)*DOFs+4) + s * ImE(1) * Basis(p)
+            Force((p-1)*DOFs+4) = Force((p-1)*DOFs+4) + s * (ImE(1) + Normal(1)*ImEz) * Basis(p)
           CASE(5)
-            Force((p-1)*DOFs+5) = Force((p-1)*DOFs+5) + s * ImE(2) * Basis(p)
+            Force((p-1)*DOFs+5) = Force((p-1)*DOFs+5) + s * (ImE(2) + Normal(2)*ImEz) * Basis(p)
           CASE(6)
-            Force((p-1)*DOFs+6) = Force((p-1)*DOFs+6) + s * ImEz * Basis(p)
+            Force((p-1)*DOFs+6) = Force((p-1)*DOFs+6) + s * (ImE(3) + Normal(3)*ImEz) * Basis(p)
           END SELECT
         END DO
       END DO

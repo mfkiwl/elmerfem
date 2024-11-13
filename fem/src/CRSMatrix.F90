@@ -399,7 +399,7 @@ CONTAINS
 
 
 !------------------------------------------------------------------------------
-!> Check existance of a matrix element.
+!> Check existence of a matrix element.
 !------------------------------------------------------------------------------
   FUNCTION CRS_CheckMatrixElement( A,i,j ) RESULT ( Found ) 
 !------------------------------------------------------------------------------
@@ -3677,7 +3677,7 @@ SUBROUTINE CRS_RowSumInfo( A, Values )
     CALL Info( 'CRS_IncompleteLU', Message, Level=6 )
 
     WRITE(Message,'(A,I1,A,F8.2)') 'ILU(',ILUn, &
-        ') (Real), Factorization ready at (s): ', CPUTime()-st
+        ') (Real), Factorization time (s): ', CPUTime()-st
     CALL Info( 'CRS_IncompleteLU', Message, Level=6 )
 
     Status = .TRUE.

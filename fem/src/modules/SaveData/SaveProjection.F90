@@ -34,7 +34,7 @@
 ! *           Keilaranta 14
 ! *           02101 Espoo, Finland 
 ! *
-! *  Original Date: 20 Nov 2001
+! *  Original Date: 1.10.2024
 ! *
 ! *****************************************************************************/
 
@@ -87,7 +87,11 @@ SUBROUTINE SaveProjection( Model,Solver,dt,Transient )
   CALL Info('SaveProjection','Creating selected projected values as fields',Level=8)
 
   Params => GetSolverParams()
-  
+
+  ! Because this solver does not have a DefaultInitialize slot the nonlinear projectors
+  ! are not initialized. Do it here.
+  CALL GenerateProjectors(Model,Solver,Nonlinear = .TRUE. )
+ 
   i = 0
   DO WHILE(.TRUE.)  
     i = i + 1
@@ -101,11 +105,12 @@ SUBROUTINE SaveProjection( Model,Solver,dt,Transient )
   END DO
   NoVar = i-1
   CALL Info('SaveProjection','Saving projections from '//I2S(NoVar)//' fields')
-   
+  IF(NoVar==0) RETURN
 
+  Nrm = 0.0_dp
   DO i=1,NoVar    
     VarName = ListGetString( Params,'Variable '//I2S(i), Found )
-    Var => VariableGet( Model % Variables, TRIM(VarName) )
+    Var => VariableGet( Model % Variables, TRIM(VarName), ThisOnly = .TRUE.)
     CALL info('SaveProjection','Doing variable: '//TRIM(VarName),Level=8)
     
     TargetName = ListGetString( Params,'Target Variable '//I2S(i), Found )
@@ -116,7 +121,7 @@ SUBROUTINE SaveProjection( Model,Solver,dt,Transient )
     ToSlave = ListGetLogical( Params,'Project To Slave '//I2S(i),Found ) 
     ToMaster = ListGetLogical( Params,'Project To Master '//I2S(i),Found ) 
     
-    TargetVar => VariableGet( Model % Variables, TRIM(TargetName) )
+    TargetVar => VariableGet( Model % Variables, TRIM(TargetName), ThisOnly = .TRUE.)
     IF(.NOT. ASSOCIATED(TargetVar)) THEN
       IF(.NOT. ASSOCIATED(Var % Perm) ) THEN
         UnitPerm => NULL()
@@ -139,7 +144,7 @@ SUBROUTINE SaveProjection( Model,Solver,dt,Transient )
     CALL ProjectToVariable()
     Nrm = Nrm + SUM(TargetVar % Values**2)
   END DO
-
+  
   Nrm = SQRT(Nrm)
   IF(SIZE(Solver % Variable % Values) == 1 ) THEN
     Solver % Variable % Values = Nrm
@@ -153,7 +158,7 @@ CONTAINS
 
   SUBROUTINE ProjectToVariable()
     TYPE(Matrix_t), POINTER :: A
-    INTEGER :: bc, dofs, i, j, k, pi, pj
+    INTEGER :: bc, dofs, i, j, k, pi, pj, m
     INTEGER, POINTER :: Rows(:), Cols(:)
     LOGICAL :: acti, actj, AddThis
     REAL(KIND=dp) :: r1
@@ -196,27 +201,34 @@ CONTAINS
       END IF
 
       ! Create table telling which is slave/master dof. 
-      ALLOCATE(IsInvInvPerm(MAXVAL(Cols)))
+      m = MAXVAL(Cols)
+      ALLOCATE(IsInvInvPerm(m))
       IsInvInvPerm = .FALSE.
       DO i=1,n
         pi = A % InvPerm(i)
-        IF(pi > 0 ) IsInvInvPerm(pi) = .TRUE.
+        IF(pi > 0 .AND. pi <= m) IsInvInvPerm(pi) = .TRUE.
       END DO
 
 
       DO k=1,dofs
         DO i=1,n
           pi = A % InvPerm(i)
-          IF(pi == 0) CYCLE
+          IF(pi == 0 .OR. pi > m) CYCLE
           acti = IsInvInvPerm(pi)
-          IF(ASSOCIATED(Var % Perm)) pi = Var % Perm(pi)
-          IF(pi==0) CYCLE
+          IF(ASSOCIATED(Var % Perm)) THEN
+            IF(pi > SIZE(Var % Perm)) CYCLE
+            pi = Var % Perm(pi)
+            IF(pi==0) CYCLE
+          END IF
           pi = dofs*(pi-1)+k
           r1 = 0.0_dp
           DO j=Rows(i),Rows(i+1)-1
             pj = Cols(j)
-            IF(ASSOCIATED(Var % Perm)) pj = Var % Perm(pj)
-            IF(pj==0) CYCLE            
+            IF(ASSOCIATED(Var % Perm)) THEN
+              IF(pj > SIZE(Var % Perm)) CYCLE
+              pj = Var % Perm(pj)
+              IF(pj==0) CYCLE
+            END IF
             pj = dofs*(pj-1)+k
             actj = IsInvInvPerm(Cols(j))
             
